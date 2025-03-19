@@ -1,0 +1,16 @@
+{
+  "name": "zoho-webhook",
+  "version": "1.0.0",
+  "description": "A webhook to create sales receipts in Zoho Books",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "axios": "^1.5.0",
+    "body-parser": "^1.20.2"
+  }
+}
