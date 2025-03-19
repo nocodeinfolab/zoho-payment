@@ -6,7 +6,9 @@ const bodyParser = require("body-parser");
 const app = express();
 app.use(bodyParser.json());
 
-const { ZOHO_ACCESS_TOKEN, ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_ORGANIZATION_ID, PORT = 3000 } = process.env;
+// Use `let` instead of `const` for ZOHO_ACCESS_TOKEN
+let ZOHO_ACCESS_TOKEN = process.env.ZOHO_ACCESS_TOKEN;
+const { ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_ORGANIZATION_ID, PORT = 3000 } = process.env;
 
 // Function to refresh Zoho token
 async function refreshZohoToken() {
@@ -14,7 +16,8 @@ async function refreshZohoToken() {
         const response = await axios.post("https://accounts.zoho.com/oauth/v2/token", null, {
             params: { refresh_token: ZOHO_REFRESH_TOKEN, client_id: ZOHO_CLIENT_ID, client_secret: ZOHO_CLIENT_SECRET, grant_type: "refresh_token" }
         });
-        ZOHO_ACCESS_TOKEN = response.data.access_token;
+        ZOHO_ACCESS_TOKEN = response.data.access_token; // This is now allowed since ZOHO_ACCESS_TOKEN is `let`
+        console.log("Zoho Access Token Refreshed:", ZOHO_ACCESS_TOKEN);
     } catch (error) {
         console.error("Failed to refresh Zoho token:", error.response?.data || error.message);
         throw new Error("Failed to refresh Zoho token");
@@ -29,10 +32,13 @@ async function makeZohoRequest(config, retry = true) {
         return response.data;
     } catch (error) {
         if ((error.response?.status === 401 || error.response?.data?.code === 57) && retry) {
+            console.log("Access token expired or invalid. Refreshing token and retrying request...");
             await refreshZohoToken();
-            return makeZohoRequest(config, false);
+            return makeZohoRequest(config, false); // Retry the request once with the new token
+        } else {
+            console.error("API request failed:", error.response ? error.response.data : error.message);
+            throw new Error("API request failed");
         }
-        throw new Error("API request failed");
     }
 }
 
