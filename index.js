@@ -8,6 +8,7 @@ app.use(bodyParser.json());
 
 const { ZOHO_ACCESS_TOKEN, ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_ORGANIZATION_ID, PORT = 3000 } = process.env;
 
+// Function to refresh Zoho token
 async function refreshZohoToken() {
     try {
         const response = await axios.post("https://accounts.zoho.com/oauth/v2/token", null, {
@@ -20,6 +21,7 @@ async function refreshZohoToken() {
     }
 }
 
+// Function to make API requests with token expiration handling
 async function makeZohoRequest(config, retry = true) {
     try {
         config.headers = { ...config.headers, Authorization: `Zoho-oauthtoken ${ZOHO_ACCESS_TOKEN}` };
@@ -34,6 +36,7 @@ async function makeZohoRequest(config, retry = true) {
     }
 }
 
+// Function to find an existing invoice by transaction ID
 async function findExistingInvoice(transactionId) {
     const response = await makeZohoRequest({
         method: "get",
@@ -42,34 +45,73 @@ async function findExistingInvoice(transactionId) {
     return response.invoices.find(invoice => invoice.reference_number === transactionId) || null;
 }
 
-async function createPayment(invoiceId, amount, transactionId, transaction) {
-    const invoiceResponse = await makeZohoRequest({
-        method: "get",
-        url: `https://www.zohoapis.com/books/v3/invoices/${invoiceId}?organization_id=${ZOHO_ORGANIZATION_ID}`
-    });
-    const { customer_id: customerId, balance: invoiceBalance } = invoiceResponse.invoice;
+// Function to update an invoice with discount (if applicable)
+async function updateInvoice(invoiceId, transaction) {
+    try {
+        const discountAmount = parseFloat(transaction["Discount"]) || 0;
+        const lineItems = (transaction["Services (link)"] || []).map((service, index) => ({
+            description: service.value || "Service",
+            rate: parseFloat(transaction["Prices"][index]?.value) || 0,
+            quantity: 1
+        }));
 
-    if (amount > invoiceBalance) {
-        await createCreditNote(customerId, amount - invoiceBalance, transactionId, transaction);
-        throw new Error("Payment amount exceeds the invoice balance. Credit note created.");
+        const invoiceData = {
+            line_items: lineItems,
+            total: parseFloat(transaction["Payable Amount"]) || 0,
+            discount: discountAmount,
+            discount_type: "entity_level", // Apply discount at the invoice level
+            is_discount_before_tax: true, // Apply discount before tax
+            reason: "Updating invoice due to payment adjustment" // Mandatory reason for updating a sent invoice
+        };
+
+        const response = await makeZohoRequest({
+            method: "put",
+            url: `https://www.zohoapis.com/books/v3/invoices/${invoiceId}?organization_id=${ZOHO_ORGANIZATION_ID}`,
+            data: invoiceData
+        });
+        return response.invoice;
+    } catch (error) {
+        console.error("Error updating invoice:", error.message);
+        throw new Error("Failed to update invoice");
     }
-
-    const paymentData = {
-        customer_id: customerId,
-        payment_mode: determinePaymentMode(transaction),
-        amount: Math.min(amount, invoiceBalance),
-        date: new Date().toISOString().split("T")[0],
-        reference_number: transactionId,
-        invoices: [{ invoice_id: invoiceId, amount_applied: Math.min(amount, invoiceBalance) }]
-    };
-
-    return makeZohoRequest({
-        method: "post",
-        url: `https://www.zohoapis.com/books/v3/customerpayments?organization_id=${ZOHO_ORGANIZATION_ID}`,
-        data: paymentData
-    });
 }
 
+// Function to create a payment
+async function createPayment(invoiceId, amount, transactionId, transaction) {
+    try {
+        const invoiceResponse = await makeZohoRequest({
+            method: "get",
+            url: `https://www.zohoapis.com/books/v3/invoices/${invoiceId}?organization_id=${ZOHO_ORGANIZATION_ID}`
+        });
+        const { customer_id: customerId, balance: invoiceBalance } = invoiceResponse.invoice;
+
+        if (amount > invoiceBalance) {
+            await createCreditNote(customerId, amount - invoiceBalance, transactionId, transaction);
+            throw new Error("Payment amount exceeds the invoice balance. Credit note created.");
+        }
+
+        const paymentData = {
+            customer_id: customerId,
+            payment_mode: determinePaymentMode(transaction),
+            amount: Math.min(amount, invoiceBalance),
+            date: new Date().toISOString().split("T")[0],
+            reference_number: transactionId,
+            invoices: [{ invoice_id: invoiceId, amount_applied: Math.min(amount, invoiceBalance) }]
+        };
+
+        const paymentResponse = await makeZohoRequest({
+            method: "post",
+            url: `https://www.zohoapis.com/books/v3/customerpayments?organization_id=${ZOHO_ORGANIZATION_ID}`,
+            data: paymentData
+        });
+        return paymentResponse;
+    } catch (error) {
+        console.error("Error creating payment:", error.message);
+        throw new Error("Failed to create payment");
+    }
+}
+
+// Function to create a credit note
 async function createCreditNote(customerId, amount, transactionId, transaction) {
     const creditNoteData = {
         customer_id: customerId,
@@ -90,6 +132,7 @@ async function createCreditNote(customerId, amount, transactionId, transaction) 
     });
 }
 
+// Function to determine the payment mode
 function determinePaymentMode(transaction) {
     if (transaction["Amount Paid (Cash)"] > 0) return "Cash";
     if (transaction["Bank Transfer"] > 0) return "Bank Transfer";
@@ -98,16 +141,24 @@ function determinePaymentMode(transaction) {
     return "Cash";
 }
 
+// Webhook endpoint
 app.post("/webhook", async (req, res) => {
     try {
         const transaction = req.body.items[0];
         const transactionId = transaction["Transaction ID"];
         const existingInvoice = await findExistingInvoice(transactionId);
 
-        if (!existingInvoice) return res.status(200).json({ message: "No existing invoice found. Script stopped." });
+        if (!existingInvoice) {
+            return res.status(200).json({ message: "No existing invoice found. Script stopped." });
+        }
 
+        // Step 1: Update the invoice with discount (if applicable)
+        await updateInvoice(existingInvoice.invoice_id, transaction);
+
+        // Step 2: Check if "Total Amount Paid" is greater than 0
         const totalAmountPaid = parseFloat(transaction["Total Amount Paid"]) || 0;
         if (totalAmountPaid > 0) {
+            // Step 3: Create a new payment for the invoice
             await createPayment(existingInvoice.invoice_id, totalAmountPaid, transactionId, transaction);
         }
 
@@ -121,4 +172,5 @@ app.post("/webhook", async (req, res) => {
     }
 });
 
+// Start the server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
